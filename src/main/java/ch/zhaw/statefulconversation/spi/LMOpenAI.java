@@ -145,6 +145,38 @@ public class LMOpenAI {
         return LMOpenAI.openai(messages, 1, 1);
     }
 
+    /**
+     * Some OpenAI-compatible backends (e.g. Infomaniak's Apertus/vLLM) reject
+     * message arrays containing more than one "system" role with "Invalid
+     * message role" (HTTP 400), unlike OpenAI itself. PROMISE composes prompts
+     * with a leading systemPrepend and, in some call paths (e.g. State.start()
+     * on a cyclic re-entry, where prior conversation turns already exist),
+     * a trailing systemAppend after the conversation — deliberately last so
+     * the model reads it most recently. Collapsing all system messages into
+     * one at the first position would move that trailing instruction before
+     * the conversation, changing recency behaviour. Instead, keep only the
+     * first system message as role "system" and downgrade any further system
+     * messages to role "user", in place, so ordering and content are both
+     * preserved and only one "system" role remains.
+     */
+    private static List<Utterance> downgradeExtraSystemMessages(List<Utterance> messages) {
+        List<Utterance> result = new ArrayList<>();
+        boolean systemSeen = false;
+        for (Utterance m : messages) {
+            if ("system".equals(m.getRole())) {
+                if (!systemSeen) {
+                    systemSeen = true;
+                    result.add(m);
+                } else {
+                    result.add(new Utterance("user", m.getContent(), m.getStateName()));
+                }
+            } else {
+                result.add(m);
+            }
+        }
+        return result;
+    }
+
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
     private static final Gson GSON = new GsonBuilder().addSerializationExclusionStrategy(new ExclusionStrategy() {
 
@@ -170,7 +202,8 @@ public class LMOpenAI {
             if (topP > 0.0f) {
                 payload.addProperty("top_p", topP);
             }
-            payload.add("messages", LMOpenAI.GSON.toJsonTree(message));
+            List<Utterance> normalizedMessages = LMOpenAI.downgradeExtraSystemMessages(message);
+            payload.add("messages", LMOpenAI.GSON.toJsonTree(normalizedMessages));
 
             // @TODO seems to be available in azure.openai
             // payload.addProperty("max_tokens", 800);
